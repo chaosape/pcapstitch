@@ -2,7 +2,7 @@ This is an early release of PcapStitch and this README is inadequate.
 
 
 
---BUILDING--
+# BUILDING
 * Download the GHC Platform: http://hackage.haskell.org/platform/contents.html
 * Install dependencies (NOTE: these have not been ordered, you may have to do 
   a bit of trial and error to get everything installed):
@@ -29,13 +29,13 @@ This is an early release of PcapStitch and this README is inadequate.
 * cabal configure
 * cabal build
 
---RUNNING--
+# RUNNING
 * Binary file should now exist in ./dist/build/pcapstitch/pcapstitch
 * To run "./dist/build/pcapstitch/pcapstitch [list of pcap files]"
 * If you provide a -h you will receive mildly useful information
 * Further questions can be referred to chaosape@chaosape.com
 
---OUTPUT--
+# OUTPUT
 PcapStitch outputs results in a space delimited text file.
 The output columns are described as:
 * Flow ID - This is a unique integer associated with a quintuple containing network source address, network destination address, transport protocol, transport source address and
@@ -58,7 +58,7 @@ transport destination address.  This ID will be associate with traffic bi-direct
 * Merge Records - Each merge is separated by a \emph{|}. Each merge record is a triple containing time of packet recording, network trace file that the packet was recorded in, and offset of the packet within that network trace file (starting at 1). The merge records are chronologically order from left to right.
 This text format makes processing and analyzing with a Unix environment straight forward.
 
---PROCESSING OUTPUT EXAMPLE--
+# PROCESSING OUTPUT EXAMPLE
 #!/bin/bash
 cat $1 |\
 sed -e "s/|\|,/ /g" -e "s/(\|)//g" |\
@@ -69,7 +69,7 @@ awk 'BEGIN{init=0;print "plot \"-\" using 1:2 with lines";}{
 gnuplot  -persist
 
 
---PERFORMANCE--
+# PERFORMANCE
 * Here are some results from this build where baseline is tcpdump outputing
   to /dev/null :
 #baseline/pcapstitch(0/1) filesize(MB) exec_time(secs) packet_horizon(us)
