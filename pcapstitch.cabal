@@ -1,0 +1,34 @@
+Name:           pcapstitch
+Version:        0.1
+License-file:   LICENSE
+Author:			Daniel DaCosta <chaosape@chaosape.com>
+Maintainer:		Daniel DaCosta <chaosape@chaosape.com>
+Cabal-Version: >= 1.2
+build-type:  Simple
+
+Executable pcapstitch
+  build-depends:  base>4, pcap, haskell98, pathtype, bytestring, bytestring-nums, network, containers, SHA, records, binary-strict, type-functions, kinds, template-haskell, binary
+  Main-Is:         Main.hs
+  Hs-Source-Dirs:  src
+  ghc-options: -W
+--  ghc-options:  -O2 -ddump-splices -prof -auto-all -osuf p_o
+
+
+
+-- NOTE: When compiling with profiling this build will fail the first time.
+-- perform the following steps from the main pcapstitch directory:
+-- 1) ghc -c -i./src src/Network/PcapStitch/HeaderNinja.hs
+-- 2) ghc -c -O2 -ddump-splices -prof -auto-all -osuf p_o -i./src src/Network/PcapStitch/HeaderNinja.hs
+-- 3) cp src/Network/PcapStitch/HeaderNinja.p_o dist/build/pcapstitch/pcapstitch-tmp/Network/PcapStitch/HeaderNinja.p_o
+-- 3) cp src/Network/PcapStitch/HeaderNinja.o dist/build/pcapstitch/pcapstitch-tmp/Network/PcapStitch/HeaderNinja.o
+
+
+--extra-source-files: src/Network/HeaderNinja.hs
+--Executable:     pcapstitch
+--Main-Is:        Main.hs
+--hs-source-dirs:  src
+-- ghc-options:  -ddump-splices 
+-- Standard build
+--ghc-options: -02
+-- Profiling build
+

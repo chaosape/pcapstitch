@@ -1,0 +1,452 @@
+--------------------------------------------------------------------------------
+-- | 
+--  Copyright: Dan DaCosta 2010, Chaosape LLC
+--  License: BSD-Style
+--  Maintainer: chaosape@chaosape.com
+--  Stability: expermental
+--  Portability: non-portable
+--
+-- Description: This module is responsible for handling data that implements the
+-- ManageablePacketEvent type class and applying the implemented interface.  
+-- The PacketEventManager is built to maintain in memory packets by time, the 
+-- amount of time by which data will be considered fresh ( and therefore not
+-- processed using processPacketEvent ) is determined through command line 
+-- arguments.  
+--------------------------------------------------------------------------------
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
+--TODO The mergesuccess function in runPacketEventManager' should somehow handle 
+-- the merge count command line argument. It currently does not and simply assumes
+-- the merge count is always two.  So any command line arguments provided will be
+-- ignored.
+--TODO runPacketEventManager should probably be handled via the State monad.
+--TODO runPacketEventManager documentation needs to be cleaned up.
+--TODO The chronoOrdered field should also use a mutable data structure ... maybe
+--
+module Network.PcapStitch.PacketEventManagement 
+  ( runPacketEventManager )
+where
+import Control.Monad
+import Control.Concurrent.Chan
+import Data.Int
+import qualified Data.Sequence as DS
+import Data.HashTable as HT
+import Data.Maybe
+import Debug.Trace
+import Network.PcapStitch.ManageablePacketEvent 
+import Network.PcapStitch.PcapSources
+import Network.PcapStitch.Options (Options(stitchesPerPacket,packetHorizon))
+import Network.PcapStitch.Timestamp
+import Network.PcapStitch.Utilities
+import Network.PcapStitch.Message
+import Control.Exception (evaluate)
+import Data.List.Stream
+import Prelude hiding ((++),(!!),foldl,length,splitAt,span,head,map,init,reverse)
+
+-- | This function will process all of the packets from pcap sources according to the ManageablePacketEvent 
+-- type class implementation. The process behaves something like this
+-- 1) Get the next packet in time from pcap sources.
+-- 2) Parse the packet according to the getPacketEvent implementation.
+-- 3) Test to see if this packet event has another packet event to merge with.
+-- 4) If it does, merge it and if the merge count is met process the packet event using processPacketEvent.
+-- 5) If it doesn't, queue it as long as its time minus the most recent packet in the queue is less than 
+-- the unstitched time provided via the command line. If this fails process the packet event using
+-- processPacketEvent.
+-- 6) When all packets have be read process the remaining packets in the queue .
+-- Half implemented chan use 
+
+-- MUTABLE HASHTABLE Version
+data MergeOrEqual a = Merge a | Equal a
+
+mergeorequal :: (ManageablePacketEvent storage storagestate) => MergeOrEqual storage -> MergeOrEqual storage -> Bool
+mergeorequal (Merge a) (Merge b) = merge a b 
+mergeorequal (Equal a) (Merge b) = equal a b  
+mergeorequal (Merge a) (Equal b) = equal a b  
+mergeorequal (Equal a) (Equal b) = equal a b  
+
+hashMergeOrEqual (Merge a) = hashPacketEvent a 
+hashMergeOrEqual (Equal a) = hashPacketEvent a 
+
+
+
+-- | This data structure maintains state between recurses of the runPacketEventManager function.
+data (ManageablePacketEvent a s) => PacketEventManagementMutableHash a s = PacketEventManagementMutableHash
+ {
+  -- | The options provided on the command line
+  opts :: Options,
+  -- | A list of parsed packet data structures ordered by time
+  chronoOrdered :: [a] ,
+  completeChronoOrdered :: [a],
+  ht :: HT.HashTable (MergeOrEqual a) a,
+  pktstate :: Maybe s,
+  longestChronoLength :: Int,
+  currentTime :: Timestamp
+ }
+
+
+(!-!) = (!!)
+
+
+binsearch :: (ManageablePacketEvent a s) => a -> [a] -> Maybe Int
+binsearch a lst = loop 0 $ (length lst)-1
+  where
+    loop low hi
+      | {-# SCC "hi_low_comparison" #-} hi < low = Nothing
+      | otherwise = 
+        {-# SCC "mid_comparison" #-} case compare (ts test) atime of
+          GT -> {-# SCC "loop_low" #-} loop low $ mid-1
+          LT -> {-# SCC "loop_high" #-} loop (mid+1) hi
+          EQ -> {-# SCC "loop_equal" #-} if ahash == (hs test)
+                  then Just mid
+                  else {-# SCC "walk" #-} Just . head . catMaybes $ [walkf (mid+1), walkb (mid-1)]
+      where
+        mid = (+) low $ div (hi-low) 2 
+        test = lst !-! mid
+        
+    ts = getTimestamp 
+    hs = hashPacketEvent 
+    ahash = hashPacketEvent a
+    atime = getTimestamp a
+
+    walkg f m = loop m 
+      where
+        loop m = 
+          if atime == (ts . (!-!) lst $ m)
+            then if ahash == (hs . (!-!) lst $ m) 
+                   then Just m
+                   else loop . f $ m
+            else Nothing
+
+    walkf m = walkg ((+) 1) $ m
+    walkb m = walkg (flip (-) 1) $ m
+
+
+
+perPacketData ::  (ManageablePacketEvent a s)
+              => Options 
+              -> PacketData 
+              -> (PacketEventManagementMutableHash a s)
+              -> IO (PacketEventManagementMutableHash a s)
+perPacketData options pkt mstate = (perpkt options mstate pktevent) >>= return'
+  where
+    pkteventandpktstate = getPacketEvent pkt . pktstate $ mstate
+    pktevent = fst pkteventandpktstate
+    pstate = snd pkteventandpktstate
+    return' a =  return $ a {pktstate = Just pstate}
+  
+perpkt :: (ManageablePacketEvent a s) 
+       => Options 
+       -> PacketEventManagementMutableHash a s 
+       -> a 
+       -> IO(PacketEventManagementMutableHash a s)
+perpkt options state' pktevent = purge' >>= lookup >>= act >>= lastts 
+
+  where
+    purge'                = purge options state'
+    lookup a              = liftM ((,) a) $ HT.lookup (ht a) (Merge pktevent)
+    act (a,Nothing)       = mergefail  options a pktevent
+    act (a,(Just oldpkt)) = mergesuccess options a pktevent oldpkt
+    lastts s              = 
+      if (currentTime s) < (getTimestamp pktevent)
+        then return $ s { currentTime = getTimestamp pktevent }
+        else return $ s     
+    
+
+
+
+
+-- What is done when we have no other packet events to merge with
+mergefail options state pkt = insert >> lengthchk >>= return'
+ where 
+{-   hrzninfo     = 
+     "New Horizon List Length = "
+     ++(show (length.chronoOrdered $ state))
+     ++". Current Horizon Time = "
+     ++(show diff)-}
+   insert       = HT.insert (ht state) (Merge pkt) pkt
+   lengthchk    = return state
+       {-if (&&) (not . null . chronoOrdered $ state )
+          . (<) 100 
+          . (-) (length . chronoOrdered $ state )
+          . longestChronoLength $ state
+         then infoOutput options hrzninfo 
+              $ return 
+              $ state { longestChronoLength = length.chronoOrdered $ state }
+         else  return $ state -}
+
+--   return' a   = return $ a { chronoOrdered = (chronoOrdered a)++[pkt]} 
+   return' a   = return $ a { chronoOrdered = possibleOutOfOrderInsert options state fnchrono pkt} 
+
+   fnchrono = chronoOrdered state
+
+
+--   diff        = (-) ( getTimestamp . last . chronoOrdered $ state) 
+--                 $ ( getTimestamp . head . chronoOrdered $ state)
+
+
+addToEnd :: a -> [a] -> [a]
+addToEnd a [] = a:[]
+addToEnd a lst = --loop lst
+  --reverse $ (a:reverse lst)
+  lst++[a]
+  where
+    loop [] = a:[]
+    loop (x:xs) = x:loop xs  
+
+    loop' j
+      | j == end = (lst!!j):a:[]
+      | otherwise =  (lst!!j):loop' (j+1)
+      
+    
+    end = (length lst) - 1
+
+
+dropAt :: Int -> [a] -> [a]
+--dropAt i x:[] = [] 
+dropAt i lst 
+  | i == (length lst) - 1 = init lst
+  | otherwise = loop 0 lst
+  -- f++b
+  where
+    loop j (x:xs) 
+      | j<i = x:loop (j+1) xs
+      | otherwise = xs
+
+    split = splitAt (i+1) lst
+    f = init . fst  $ split 
+    b = snd split 
+
+
+{-
+dropAt :: Int -> [a] -> [a]
+dropAt i lst = loop 0
+  where
+    loop j  
+      | j<i = (lst!!j):loop (j+1)
+      | otherwise = snd $ splitAt (j+1) lst
+-}
+
+possibleOutOfOrderInsert options state lst pkt
+  | (getTimestamp pkt) >= (currentTime state) = 
+    addToEnd pkt lst
+  | otherwise = 
+    warningOutput options "Out of Order Packet Detected -> Re-ordering" 
+    $ insertBy compareMS pkt lst
+  where 
+    compareMS a b = compare (getTimestamp a) (getTimestamp b)
+  
+
+
+
+
+-- What is done whe we find another packet to merge with
+mergesuccess options state newpkt oldpkt = insert'
+  where
+    -- Take out the already stored packet from the chronologically ordered list
+    drope   = {-# SCC "drope" #-} binsearch oldpkt $ chronoOrdered state
+    nchrono Nothing  = 
+      error 
+        $ "Binsearch failure for packet"
+        ++(show oldpkt)++"---"
+        ++((foldl (\ a b -> a . (shows b) . (showString "\n")) id  (chronoOrdered state)) "")
+    nchrono (Just i) = {-# SCC "ncrhono" #-} dropAt i $ chronoOrdered state --uncurry (\ a -> (++) $ init a) $ splitlst i
+
+    fnchrono = {-# SCC "fnchrono" #-} nchrono drope
+    cchrono  = {-# SCC "cchrono" #-} completeChronoOrdered state
+
+    splitlst      i  = {-# SCC "splitlst" #-} splitAt (i+1) $ chronoOrdered state 
+    -- Merge the old packet with the new packet
+    mpkt    = {-# SCC "mpkt" #-} (mergePacketEvent oldpkt newpkt) 
+    -- Take out the alread stored packet from the merge check table
+    --delete  = HT.delete (ht state) (Equal oldpkt)
+    mlcheck = {-# SCC "mlcheck" #-} mergeLength mpkt > stitchesPerPacket options
+    -- Insert the merged packet
+    insert  =  HT.update (ht state) (Equal mpkt) $ mpkt
+    insert'  = {-# SCC "insert'" #-} 
+      if mlcheck 
+        then HT.delete (ht state) (Equal mpkt)>>complete
+        else (HT.update (ht state) (Equal mpkt) $ mpkt)>>incomplete
+
+    {-merror  = 
+      if mlcheck 
+        then error "runPacketEventManager: Too Many Merges!!!"
+        else return ()          -}
+    --Merge and remove the packet from the hashtable and the chrono queue
+    --return' = return $ state { chronoOrdered = (nchrono drope)++[mpkt] }
+    incomplete = {-# SCC "incomplete" #-} return $ state {chronoOrdered = possibleOutOfOrderInsert options state fnchrono mpkt}
+    complete = {-# SCC "complete" #-} return $ state { chronoOrdered = fnchrono,completeChronoOrdered = possibleOutOfOrderInsert options state cchrono mpkt}
+
+
+--    handleoutofordercase mpkt [] = mpkt:[]
+--    handleoutofordercase mpkt xs 
+--      | (getTimestamp mpkt) >= (getTimestamp . last $ xs) = 
+
+
+
+
+{-nopurge options state =      
+  (null . chronoOrdered $ state)
+  || ((<) diff $ packetHorizon options)
+  || (packetHorizon options == 0)
+  where
+    diff = ( getTimestamp . last . chronoOrdered $ state) 
+           - ( getTimestamp . head . chronoOrdered $ state)
+-}
+
+
+mergeOrdered xs ys = loop xs ys
+  where
+    loop [] ys = ys
+    loop xs [] = xs 
+    loop a@(x:xs) b@(y:ys) 
+      | getTimestamp x > getTimestamp y = y:loop a ys
+      | getTimestamp x < getTimestamp y = x:loop xs b
+      | otherwise = x:loop xs b
+
+purge options state = process>>delete>>return'
+  where 
+    cremovessandckeeps = span (purgeCompare options state) $ completeChronoOrdered state 
+    iremovesandikeeps = span (purgeCompare options state) $ chronoOrdered state
+    iremoves = fst iremovesandikeeps
+    ikeeps = snd iremovesandikeeps
+    cremoves = fst cremovessandckeeps
+    ckeeps = snd cremovessandckeeps
+    process = mapM_ processPacketEvent $ mergeOrdered iremoves cremoves
+    delete = mapM_ (HT.delete (ht state)) (map Equal iremoves) 
+    return' = return $ state { chronoOrdered = ikeeps, completeChronoOrdered = ckeeps}
+
+
+purgeCompare options state a = (difference > (packetHorizon options))
+  where 
+    difference =  
+--      (-) (getTimestamp . last . chronoOrdered $ state) (getTimestamp a)
+      (-) (currentTime state) (getTimestamp a)
+
+ 
+
+
+runPacketEventManager pcs options = newmap >>= newstart >>= mapdata >>= finish
+ where
+   newmap     = HT.new mergeorequal hashMergeOrEqual
+   newstart j = 
+     return 
+     $ ((PacketEventManagementMutableHash options [] [] j Nothing 0 (Timestamp 0 0)) 
+         :: PacketEventManagementMutableHash Message ParseState)
+   mapdata    = mapPacketDataWith (perPacketData options) pcs
+   finish     = mapM_ processPacketEvent . chronoOrdered
+
+
+
+
+
+--  runPacketEventManager' :: (ManageablePacketEvent a s) => PacketEventManagementMutableHash a s -> Options -> PacketEventManagementMutableHash a s -> StateT PcapSources IO ()
+--  runPacketEventManager' = undefined
+
+
+
+{-runPacketEventManagerI options = do
+ j <- liftIO $ HT.new mergeorequal hashMergeOrEqual
+ let startstate = PacketEventManagementMutableHash options [] j Nothing :: PacketEventManagementMutableHash Message ParseState
+ last <- mapPacketDataWith (perPacketData options) startstate
+ liftIO (mapM_ processPacketEvent (chronoOrdered last))
+ where
+  runPacketEventManager' :: (ManageablePacketEvent a s) => PacketEventManagementMutableHash a s -> Options -> PacketEventManagementMutableHash a s -> StateT PcapSources IO ()
+  runPacketEventManager' = undefined-}
+
+
+
+--instance  (ManageablePacketEvent a s) => PacketEventManager (PacketEventManagementMutableHash a s) Options where 
+--  runPacketEventManager = undefined
+
+--  runPacketEventManager _ = runPacketEventManagerI
+
+
+--instance  (ManageablePacketEvent a s) => PacketEventManager (PacketEventManagementMutableHash a s) Options where
+{-runPacketEventManagerI' {-fixpacketeventmanager-} options = do
+    -- Make a new hash table
+    j <- liftIO $ HT.new mergeorequal hashMergeOrEqual
+    -- Call the function that does all the work
+    runPacketEventManager' {-fixpacketeventmanager-} options Nothing (PacketEventManagementMutableHash options [] j Nothing)
+    where
+      runPacketEventManager' :: (ManageablePacketEvent Message ParseState) => {-PacketEventManagementMutableHash a s -> -}Options -> Maybe ParseState -> PacketEventManagementMutableHash Message ParseState -> StateT PcapSources IO ()
+      runPacketEventManager' {-fix-} options pstate mstate = do
+        -- Get the next packet
+        pkt <- nextPacketData
+        -- Packet could be empty or contain data
+        case pkt of
+          -- If the Packet is empty print out the remaining packets
+          Nothing -> liftIO (mapM_ processPacketEvent (chronoOrdered mstate))
+          -- If there is data to parse continue recusion
+          Just pkt->  do
+            -- Convert the PacketData to an abstract type conforming to the ManageablePacketEvent type class
+            let (pstate',pktevent) = packethandling pstate pkt
+            -- Determine how the next packet should be handled, because we are using Data.HashTable we need to 
+            -- transform the results into the State monad
+            mstate' <- case pktevent of { Just pe -> liftIO $ perpkt options mstate pe; Nothing -> return mstate}
+            -- Continue to to try to get packets
+            runPacketEventManager' {-fix-} options pstate' mstate'
+
+      -- Call the getPacketEvent interface
+      packethandling pktstate packetdata = let (event,pktstate') = getPacketEvent packetdata pktstate in (Just pktstate',event)
+
+      -- What is done with each packet event
+      perpkt :: (ManageablePacketEvent a s) => Options -> PacketEventManagementMutableHash a s -> a -> IO(PacketEventManagementMutableHash a s)
+      perpkt options state pktevent = 
+        do 
+        -- check to see if this new incoming packet is mergeable 
+        lu <- HT.lookup (ht state) (Merge pktevent)
+        new<- case lu of
+                Nothing -> mergefail  options state pktevent
+                Just oldpkt -> mergesuccess options state pktevent oldpkt
+
+        purge options new
+
+
+
+
+      -- What is done when we have no other packet events to merge with
+      mergefail options state pkt = do
+          _ <- HT.insert (ht state) (Merge pkt) pkt
+          return $ state { chronoOrdered = (chronoOrdered state)++[pkt]}
+
+      -- What is done whe we find another packet to merge with
+      mergesuccess options state newpkt oldpkt = do
+          -- Take out the already stored packet from the chronologically ordered list
+          let ncor = deleteBy equal oldpkt (chronoOrdered state)
+          -- Take out the alread stored packet from the merge check table
+          _ <- HT.delete (ht state) (Merge oldpkt)
+          -- Merge the old packet with the new packet
+          let mpkt = (mergePacketEvent oldpkt newpkt)
+          -- Insert the merged packet
+          _ <- if mergeLength mpkt > stitchesPerPacket options then error "runPacketEventManager: Too Many Merges!!!" else HT.insert (ht state) (Merge mpkt) mpkt
+          --Merge and remove the packet from the hashtable and the chrono queue
+          return $ state { chronoOrdered = insertBy (\ a b -> compare (getTimestamp a) (getTimestamp b)) mpkt ncor } 
+
+
+
+      purge options state = do
+        let (removes,keeps) = span (purgeCompare options state) $ chronoOrdered state
+        if (packetHorizon options) == 0
+          then return $ state
+          else 
+            case removes of
+              [] -> return $ state
+              _ -> 
+                do 
+                -- Do whatever IO should be done with outgoing packets
+                _ <- {-trace ("purge "++(show $ map hashPacketEvent removes)) $-} mapM_ processPacketEvent removes
+                -- Remove the packets from our merge check table
+                {- lus<- sequence $ map (HT.lookup (ht state)) removes -}
+                _ <- {-trace (show.length.catMaybes $ lus) $-} mapM_ (HT.delete (ht state)) (map Equal removes)
+                {-lst <- HT.toList.ht$state-}
+                return $ {-trace (show $ map (hashPacketEvent.fst ) lst) $-} state { chronoOrdered = keeps}
+
+      purgeCompare options state a = difference > (packetHorizon options)
+        where 
+          difference = (((getTimestamp.last) (chronoOrdered state)) - (getTimestamp a))
+
+-}

@@ -1,0 +1,153 @@
+#!/usr/bin/awk -f
+BEGIN {
+    printf("BEGIN TRANSACTION;\n");
+    printf("CREATE TABLE Packets("\
+           "PUID INTEGER PRIMARY KEY ASC, "\
+           "FID INTEGER, "\
+           "WireLength INTEGER, "\
+           "PhysicalPType, "\
+           "LinkSAddr, "\
+           "LinkDAddr, "\
+           "LinkPType, "\
+           "NetworkSAddr, "\
+           "NetworkDAddr, "\
+           "NetworkPType, "\
+           "TransportSAddr, "\
+           "TransportDAddr);\n"\
+        );
+
+    printf("CREATE TABLE SendEvent("\
+           "PUID INTEGER, "\
+           "Time REAL, "\
+           "FilePacketOffset INTEGER, "\
+           "File);\n"\
+        );
+    printf("CREATE TABLE ReceiveEvent("\
+           "PUID INTEGER, "\
+           "Time REAL, "\
+           "FilePacketOffset INTEGER, "\
+           "File);\n"\
+        );
+
+    printf("CREATE TABLE TCPInfo("\
+           "PUID INTEGER, "\
+           "Sequence INTEGER, "\
+           "Acknowledgement INTEGER, "\
+           "Offset INTEGER, "\
+           "Checksum INTEGER, "\
+           "PayloadHash);\n"\
+        );
+
+    printf("CREATE TABLE UDPInfo("\
+           "PUID INTEGER, "\
+           "PayloadHash);\n"\
+        );
+
+    puid = 0;
+
+}
+{
+    fid = $1;
+    wirelength = $2
+    PhysicalPType = $3;
+    LinkSAddr = $4;
+    LinkDAddr = $5;
+    LinkPType = $6;
+    NetworkSAddr = $7;
+    NetworkDAddr = $8;
+    NetworkPType = $9;
+    TransportSAddr = $10;
+    TransportDAddr = $11;
+    ERecords = $12;
+    printf( "INSERT INTO Packets VALUES(%i,%i,%i,'%s','%s','%s','%s','%s','%s','%s','%s','%s');\n", \
+            puid,\
+            fid,\
+            wirelength,\
+            PhysicalPType,\
+            LinkSAddr,\
+            LinkDAddr,\
+            LinkPType,\
+            NetworkSAddr,\
+            NetworkDAddr,\
+            NetworkPType,\
+            TransportSAddr,\
+            TransportDAddr);
+
+    if(NetworkPType == "TCP")
+    {
+        Sequence = $13;
+        Acknowledgement = $14;
+        Offset = $15;
+        Checksum = $16;
+        PayloadHash = $17;
+        printf( "INSERT INTO TCPInfo VALUES(%i,%i,%i,%i,%i,'%s');\n",\
+               puid,\
+               Sequence,\
+               Acknowledgement,\
+               Offset,\
+               Checksum,\
+               PayloadHash );
+
+    }
+    else if (NetworkPType == "UDP")
+    {
+        PayloadHash = $13;
+        printf( "INSERT INTO UDPInfo VALUES(%i,'%s');\n", \
+               puid,\
+                PayloadHash );
+    }
+    else
+    {
+        print "WARNING: Unhandled Transport Type -> " NetworkPType > "/dev/stderr";
+        print $0 > "/dev/stderr";
+    }
+
+    split(ERecords,records,"|");
+    gsub(/[()]/,"",records[1]);
+    split(records[1],srecord,",");
+    stime = srecord[1];
+    sfile = srecord[2];
+    scnt  = srecord[3];
+    printf ("INSERT INTO SendEvent VALUES(%i,%f,%i,'%s');\n",\
+            puid,\
+            stime,\
+            scnt,\
+            sfile);
+
+    if(length(records)<=2)
+    {
+        gsub(/[()]/,"",records[2]);
+        split(records[2],rrecord,",");
+        rtime = rrecord[1];
+        rfile = rrecord[2];
+        rcnt  = rrecord[3];
+
+        if(stime>rtime)
+        {
+            print "WARNING: Send time greater than receive time?!?!??!" > "/dev/stderr";
+            print $0 > "/dev/stderr";
+        }
+
+        printf ("INSERT INTO ReceiveEvent VALUES(%i,%f,%i,'%s');\n", \
+            puid,\
+            rtime,\
+            rcnt,\
+            rfile);
+
+
+
+    }
+    else
+    {
+        print "WARNING: Greater than 2 Event Records?!?!?" > "/dev/stderr" ; 
+        print $0 > "/dev/stderr";
+    }
+
+            
+    puid = puid + 1;
+}
+END {
+    print("END TRANSACTION;\n");
+
+}
+
