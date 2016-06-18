@@ -6,26 +6,26 @@ This is an early release of PcapStitch and this README is inadequate.
 * Download the GHC Platform: http://hackage.haskell.org/platform/contents.html
 * Install dependencies (NOTE: these have not been ordered, you may have to do 
   a bit of trial and error to get everything installed):
-** cabal install network
-** cabal install pcap
-** cabal install pathtype
-** cabal install bytestring
-** cabal install bytestring-nums
-** cabal install 'QuickCheck < 2'
-** cabal install containers
-** cabal install records
-** cabal install binary-strict
-** cabal install type-functions
-** cabal install kinds
-** cabal install template-haskell
-** cabal install binary
+ * cabal install network
+ * cabal install pcap
+ * cabal install pathtype
+ * cabal install bytestring
+ * cabal install bytestring-nums
+ * cabal install 'QuickCheck < 2'
+ * cabal install containers
+ * cabal install records
+ * cabal install binary-strict
+ * cabal install type-functions
+ * cabal install kinds
+ * cabal install template-haskell
+ * cabal install binary
 * Perform the following steps in the pcapstitch direction (NOTE: these have to 
   be done because I have this package compiling with profiling and currently it 
   seems that cabal does not handle template-haskell and profiling elegantly):
-** ghc -c -i./src src/Network/PcapStitch/HeaderNinja.hs
-** ghc -c -O2 -ddump-splices -prof -auto-all -osuf p_o -i./src src/Network/PcapStitch/HeaderNinja.hs
-** cp src/Network/PcapStitch/HeaderNinja.p_o dist/build/pcapstitch/pcapstitch-tmp/Network/PcapStitch/HeaderNinja.p_o
-** cp src/Network/PcapStitch/HeaderNinja.o dist/build/pcapstitch/pcapstitch-tmp/Network/PcapStitch/HeaderNinja.o
+ * ghc -c -i./src src/Network/PcapStitch/HeaderNinja.hs
+ * ghc -c -O2 -ddump-splices -prof -auto-all -osuf p_o -i./src src/Network/PcapStitch/HeaderNinja.hs
+ * cp src/Network/PcapStitch/HeaderNinja.p_o dist/build/pcapstitch/pcapstitch-tmp/Network/PcapStitch/HeaderNinja.p_o
+ * cp src/Network/PcapStitch/HeaderNinja.o dist/build/pcapstitch/pcapstitch-tmp/Network/PcapStitch/HeaderNinja.o
 * cabal configure
 * cabal build
 
@@ -40,11 +40,11 @@ PcapStitch outputs results in a space delimited text file.
 The output columns are described as:
 * Flow ID - This is a unique integer associated with a quintuple containing network source address, network destination address, transport protocol, transport source address and
 transport destination address.  This ID will be associate with traffic bi-directionally by defining the quintuple as (src_l,dst_l,proto,src_t,dest_t) where:
-** src_l is the greater of the source and destination network address when compared in integral form
-** dst_l is the lesser of the source and destination network address when compared in integral form
-** proto is the transport layer protocol
-** src_t is the transport source address if the network source address is greater than the network destination address and the transport destination address otherwise
-** dst_t is the transport destination address if the network source address is greater than the network destination address and the transport source address otherwise
+ * src_l is the greater of the source and destination network address when compared in integral form
+ * dst_l is the lesser of the source and destination network address when compared in integral form
+ * proto is the transport layer protocol
+ * src_t is the transport source address if the network source address is greater than the network destination address and the transport destination address otherwise
+ * dst_t is the transport destination address if the network source address is greater than the network destination address and the transport source address otherwise
 * Wire length - This is size in byte of the packet at the link layer.
 * Link Layer Type - The protocol used at the link layer.
 * Link layer Source Address - The link layer source address.
